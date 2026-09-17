@@ -10,8 +10,8 @@ Create a `.env` file in the project root with:
 
 ```
 VITE_SUPABASE_URL=https://your-project.supabase.co
-VITE_SUPABASE_ANON_KEY=your_publishable_key
-VITE_GEMINI_API_KEY=your_gemini_api_key
+VITE_SUPABASE_PUBLISHABLE_KEY=your_publishable_key
+GEMINI_API_KEY=your_gemini_api_key
 ```
 
 > **Security**: Never put the Supabase `service_role` key in frontend code. The anon/publishable key is safe for client-side use because Row Level Security protects all data.

@@ -37,6 +37,7 @@ export default {
   'common.details': 'Details',
   'common.close': 'Close',
   'common.refresh': 'Refresh',
+  'common.retry': 'Retry',
   'common.yes': 'Yes',
   'common.no': 'No',
   'common.optional': 'Optional',
@@ -121,6 +122,10 @@ export default {
   'application.review_submit': 'Review & Submit',
   'application.submit_demo': 'Submit Application (Demo)',
   'application.no_applications': 'No applications found.',
+  'application.browse_schemes': 'Browse Schemes',
+  'application.error_loading': 'Unable to load applications',
+  'application.account': 'Account',
+  'application.track_subtitle': 'Track your government scheme applications and progress',
   
   // Profile
   'profile.title': 'My Profile',

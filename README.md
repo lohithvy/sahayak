@@ -90,8 +90,8 @@ npm install
 Create a `.env` file in the root directory:
 ```env
 VITE_SUPABASE_URL=https://your-project.supabase.co
-VITE_SUPABASE_ANON_KEY=your-supabase-anon-key
-VITE_GEMINI_API_KEY=your-gemini-api-key
+VITE_SUPABASE_PUBLISHABLE_KEY=your-supabase-publishable-key
+GEMINI_API_KEY=your-gemini-api-key
 ```
 *(Note: Sahayak features robust offline mock fallbacks if external API keys are not supplied!)*
 

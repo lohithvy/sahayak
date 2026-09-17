@@ -4,7 +4,7 @@ import { handleGeminiRequest } from './server/gemini-server.js';
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
-  const geminiApiKey = env.GEMINI_API_KEY || env.VITE_GEMINI_API_KEY;
+  const geminiApiKey = env.GEMINI_API_KEY;
 
   return {
     plugins: [

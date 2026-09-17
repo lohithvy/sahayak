@@ -1,18 +1,45 @@
 import { createClient } from '@supabase/supabase-js';
 
+// Resolve Supabase URL
 const supabaseUrl = 
-  (typeof import.meta !== 'undefined' && import.meta.env?.VITE_SUPABASE_URL) ||
-  (typeof process !== 'undefined' && process.env?.VITE_SUPABASE_URL) || '';
+  (typeof import.meta !== 'undefined' && (
+    import.meta.env?.VITE_SUPABASE_URL ||
+    import.meta.env?.NEXT_PUBLIC_SUPABASE_URL ||
+    import.meta.env?.SUPABASE_URL
+  )) ||
+  (typeof process !== 'undefined' && (
+    process.env?.VITE_SUPABASE_URL ||
+    process.env?.NEXT_PUBLIC_SUPABASE_URL ||
+    process.env?.SUPABASE_URL
+  )) || '';
 
-const supabaseAnonKey = 
-  (typeof import.meta !== 'undefined' && import.meta.env?.VITE_SUPABASE_ANON_KEY) ||
-  (typeof process !== 'undefined' && process.env?.VITE_SUPABASE_ANON_KEY) || '';
+// Resolve Supabase Publishable / Anon Key (VITE_SUPABASE_PUBLISHABLE_KEY primary, VITE_SUPABASE_ANON_KEY fallback)
+const supabasePublishableKey = 
+  (typeof import.meta !== 'undefined' && (
+    import.meta.env?.VITE_SUPABASE_PUBLISHABLE_KEY ||
+    import.meta.env?.VITE_SUPABASE_ANON_KEY ||
+    import.meta.env?.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
+    import.meta.env?.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+    import.meta.env?.SUPABASE_PUBLISHABLE_KEY ||
+    import.meta.env?.SUPABASE_ANON_KEY
+  )) ||
+  (typeof process !== 'undefined' && (
+    process.env?.VITE_SUPABASE_PUBLISHABLE_KEY ||
+    process.env?.VITE_SUPABASE_ANON_KEY ||
+    process.env?.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
+    process.env?.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+    process.env?.SUPABASE_PUBLISHABLE_KEY ||
+    process.env?.SUPABASE_ANON_KEY
+  )) || '';
 
-if (!supabaseUrl || !supabaseAnonKey) {
-  console.warn('Supabase environment variables missing or running in non-Vite context');
+if (!supabaseUrl || !supabasePublishableKey) {
+  console.warn(
+    '[Supabase Client] Missing environment variables. Please ensure VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY (or VITE_SUPABASE_ANON_KEY) are configured.'
+  );
 }
 
 export const supabase = createClient(
   supabaseUrl || 'https://placeholder.supabase.co',
-  supabaseAnonKey || 'placeholder'
+  supabasePublishableKey || 'placeholder'
 );
+
