@@ -48,20 +48,48 @@ export default function Messages() {
     if (!user) return;
     try {
       // 1. Fetch user's active groups
-      const { data: memberGroups } = await supabase
-        .from('group_members')
-        .select('group_id, role, group_schemes(*, schemes(name))')
-        .eq('user_id', user.id)
-        .eq('status', 'active');
+      let memberGroups = [];
+      try {
+        const { data: mg } = await supabase
+          .from('group_members')
+          .select('group_id, role, group_schemes(*, schemes(name))')
+          .eq('user_id', user.id)
+          .eq('status', 'active');
+        memberGroups = mg || [];
+      } catch (err) {
+        console.warn('memberGroups fetch note:', err);
+      }
 
-      const { data: createdGroups } = await supabase
-        .from('group_schemes')
-        .select('*, schemes(name)')
-        .eq('creator_user_id', user.id);
+      // Also fetch accepted join requests as membership fallback
+      let acceptedGroups = [];
+      try {
+        const { data: reqs } = await supabase
+          .from('join_requests')
+          .select('group_id, group_schemes:group_id(*, schemes(name))')
+          .eq('requester_id', user.id)
+          .eq('status', 'accepted');
+        acceptedGroups = reqs || [];
+      } catch (err) {
+        console.warn('accepted join_requests fetch note:', err);
+      }
+
+      let createdGroups = [];
+      try {
+        const { data: cg } = await supabase
+          .from('group_schemes')
+          .select('*, schemes(name)')
+          .eq('creator_user_id', user.id);
+        createdGroups = cg || [];
+      } catch (err) {
+        console.warn('createdGroups fetch note:', err);
+      }
 
       const allGroupMap = new Map();
       (memberGroups || []).forEach(mg => {
         if (mg.group_schemes) allGroupMap.set(mg.group_schemes.id, mg.group_schemes);
+      });
+      (acceptedGroups || []).forEach(ag => {
+        if (ag.group_schemes) allGroupMap.set(ag.group_schemes.id, ag.group_schemes);
       });
       (createdGroups || []).forEach(cg => {
         allGroupMap.set(cg.id, cg);
@@ -133,11 +161,24 @@ export default function Messages() {
     const qUserId = searchParams.get('userId') || routeParams.userId;
     const qGroupId = searchParams.get('groupId') || routeParams.groupId;
 
-    if (qGroupId && groupChats.length > 0) {
+    if (qGroupId) {
       const targetGroup = groupChats.find(g => g.id === qGroupId);
       if (targetGroup) {
         setActiveChat({ type: 'group', id: targetGroup.id, data: targetGroup });
         return;
+      } else {
+        // Direct fetch if not yet loaded in groupChats
+        supabase
+          .from('group_schemes')
+          .select('*, schemes(name)')
+          .eq('id', qGroupId)
+          .maybeSingle()
+          .then(({ data }) => {
+            if (data) {
+              setActiveChat({ type: 'group', id: data.id, data });
+            }
+          })
+          .catch(() => {});
       }
     }
 

@@ -203,11 +203,128 @@ export class GroupService {
   }
 
   /**
-   * Submits a request to join a collective group
+   * Fetches an existing join request for a specific group and user
+   */
+  static async getExistingJoinRequest(groupId, userId) {
+    if (!groupId || !userId) return null;
+    try {
+      const { data, error } = await supabase
+        .from('join_requests')
+        .select('id, group_id, requester_id, status, created_at, updated_at, message')
+        .eq('group_id', groupId)
+        .eq('requester_id', userId)
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      if (error) {
+        console.warn('getExistingJoinRequest note:', error.message);
+        return null;
+      }
+      return data && data.length > 0 ? data[0] : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Fetches all join requests submitted by current user across groups
+   */
+  static async fetchUserJoinRequests(userId) {
+    if (!userId) return [];
+    try {
+      const { data, error } = await supabase
+        .from('join_requests')
+        .select('id, group_id, requester_id, status, created_at, updated_at, message')
+        .eq('requester_id', userId);
+
+      if (error) {
+        console.warn('fetchUserJoinRequests error:', error.message);
+        return [];
+      }
+      return data || [];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Submits or updates a request to join a collective group.
+   * Handles pre-checking, accepted/pending/declined states, and 23505 unique constraint errors.
    */
   static async requestToJoin(groupId, userId, creatorId, groupTitle = 'Collective Group', message = '') {
+    if (!groupId || !userId) {
+      throw new Error('Group ID and User ID are required to join.');
+    }
+
     try {
-      // 1. Insert join request using exact valid schema fields: group_id, requester_id, status, message
+      // 1. Creator check: Creators are already the owner/member of their group
+      if (creatorId && creatorId === userId) {
+        return {
+          status: 'accepted',
+          alreadyExists: true,
+          isMember: true,
+          message: 'You are the creator of this group.',
+        };
+      }
+
+      // 2. Pre-check: Check whether a request already exists for (group_id, requester_id)
+      const existing = await this.getExistingJoinRequest(groupId, userId);
+
+      if (existing) {
+        if (existing.status === 'pending') {
+          return {
+            status: 'pending',
+            alreadyExists: true,
+            message: 'Join request already sent to the group creator.',
+          };
+        }
+
+        if (existing.status === 'accepted') {
+          return {
+            status: 'accepted',
+            alreadyExists: true,
+            isMember: true,
+            message: 'You are already a member of this group.',
+          };
+        }
+
+        if (existing.status === 'declined') {
+          // If previously declined, allow requesting again by updating existing record to 'pending'
+          // This respects the UNIQUE(group_id, requester_id) constraint without creating duplicates
+          const { error: updateError } = await supabase
+            .from('join_requests')
+            .update({
+              status: 'pending',
+              message: message || 'I would like to request to join again.',
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', existing.id);
+
+          if (updateError) {
+            console.error('[GroupService requestToJoin Re-request Error]:', updateError);
+            throw updateError;
+          }
+
+          // Notify creator of the renewed request
+          if (creatorId && creatorId !== userId) {
+            await supabase.from('notifications').insert({
+              user_id: creatorId,
+              type: 'group_match',
+              title: 'Renewed Join Request',
+              message: `An entrepreneur requested again to join "${groupTitle}".`,
+              target_url: '/waiting-list',
+            }).then(() => {}).catch(() => {});
+          }
+
+          return {
+            status: 'pending',
+            renewed: true,
+            message: 'Join request re-sent to the group creator.',
+          };
+        }
+      }
+
+      // 3. No existing request: Insert new record
       const payload = {
         group_id: groupId,
         requester_id: userId,
@@ -215,21 +332,45 @@ export class GroupService {
         message: message || 'I would like to join this scheme group.',
       };
 
-      const { data, error } = await supabase
+      const { error: insertError } = await supabase
         .from('join_requests')
         .insert(payload);
 
-      if (error) {
+      if (insertError) {
+        // Handle PostgreSQL duplicate-key error 23505 (e.g. concurrent click or race condition)
+        const isDuplicate =
+          insertError.code === '23505' ||
+          insertError.message?.includes('duplicate key') ||
+          insertError.message?.includes('join_requests_group_id_requester_id_key') ||
+          insertError.details?.includes('already exists');
+
+        if (isDuplicate) {
+          const freshCheck = await this.getExistingJoinRequest(groupId, userId);
+          if (freshCheck?.status === 'accepted') {
+            return {
+              status: 'accepted',
+              alreadyExists: true,
+              isMember: true,
+              message: 'You are already a member of this group.',
+            };
+          }
+          return {
+            status: 'pending',
+            alreadyExists: true,
+            message: 'Join request already sent to the group creator.',
+          };
+        }
+
         console.error('[GroupService requestToJoin Error]:', {
-          code: error.code,
-          message: error.message,
-          details: error.details,
-          hint: error.hint,
+          code: insertError.code,
+          message: insertError.message,
+          details: insertError.details,
+          hint: insertError.hint,
         });
-        throw error;
+        throw insertError;
       }
 
-      // 2. Notify the creator
+      // 4. Notify the creator
       if (creatorId && creatorId !== userId) {
         await supabase.from('notifications').insert({
           user_id: creatorId,
@@ -240,7 +381,13 @@ export class GroupService {
         }).then(() => {}).catch(() => {});
       }
 
-      return { success: true, groupId, requesterId: userId };
+      return {
+        status: 'pending',
+        success: true,
+        groupId,
+        requesterId: userId,
+        message: 'Join request sent to the group creator!',
+      };
     } catch (e) {
       console.error('requestToJoin error:', e);
       throw e;

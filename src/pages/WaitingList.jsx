@@ -20,7 +20,7 @@ export default function WaitingList() {
   const [publicProfiles, setPublicProfiles] = useState([]);
   const [schemes, setSchemes] = useState([]);
   const [myMemberships, setMyMemberships] = useState([]);
-  const [pendingRequests, setPendingRequests] = useState([]);
+  const [userRequests, setUserRequests] = useState([]);
   const [loading, setLoading] = useState(true);
 
   // Modals state
@@ -71,7 +71,7 @@ export default function WaitingList() {
         .eq('is_active', true);
       setSchemes(schemeData || []);
 
-      // 5. User-specific memberships and requests
+      // 5. User-specific memberships and join requests
       if (user) {
         const { data: memData } = await supabase
           .from('group_members')
@@ -80,8 +80,8 @@ export default function WaitingList() {
           .eq('status', 'active');
         setMyMemberships(memData || []);
 
-        const reqData = await GroupService.fetchUserPendingRequests(user.id);
-        setPendingRequests(reqData);
+        const reqData = await GroupService.fetchUserJoinRequests(user.id);
+        setUserRequests(reqData);
       }
     } catch (e) {
       console.error('Error fetching waiting list data:', e);
@@ -128,10 +128,10 @@ export default function WaitingList() {
 
   // Submit join request
   const submitJoinRequest = async () => {
-    if (!user || !selectedGroupForJoin) return;
+    if (!user || !selectedGroupForJoin || submitting) return;
     setSubmitting(true);
     try {
-      await GroupService.requestToJoin(
+      const res = await GroupService.requestToJoin(
         selectedGroupForJoin.id,
         user.id,
         selectedGroupForJoin.creator_user_id,
@@ -139,12 +139,13 @@ export default function WaitingList() {
         joinMessage
       );
 
-      setActionSuccess('Join request sent to the group creator!');
+      setActionSuccess(res?.message || 'Join request sent to the group creator!');
       setTimeout(() => setActionSuccess(''), 4000);
       setSelectedGroupForJoin(null);
       setJoinMessage('');
-      fetchData();
+      await fetchData();
     } catch (e) {
+      console.error('submitJoinRequest error:', e);
       alert('Could not submit join request: ' + (e.message || 'Please try again.'));
     } finally {
       setSubmitting(false);
@@ -153,7 +154,7 @@ export default function WaitingList() {
 
   // Create new group
   const handleCreateGroup = async () => {
-    if (!user || !newGroup.title.trim()) return;
+    if (!user || !newGroup.title.trim() || submitting) return;
     setSubmitting(true);
     try {
       await GroupService.createGroup(user.id, {
@@ -163,29 +164,28 @@ export default function WaitingList() {
 
       setShowCreate(false);
       setNewGroup({ title: '', description: '', location: '', required_members: 5, scheme_id: '' });
-      setActionSuccess('New collective group created successfully!');
+      setActionSuccess('Collective group created successfully!');
       setTimeout(() => setActionSuccess(''), 4000);
-      fetchData();
+      await fetchData();
     } catch (e) {
-      alert('Error creating group: ' + e.message);
+      alert('Could not create group: ' + e.message);
     } finally {
       setSubmitting(false);
     }
   };
 
-  // Join waiting list directly
+  // Join general waiting list
   const handleJoinWaitingList = async () => {
     if (!user) return;
     try {
-      await GroupService.joinWaitingList(
-        user.id,
-        schemes[0]?.id || null,
-        profile?.business_type || 'General Business',
-        profile?.district || 'Tamil Nadu'
-      );
-      setActionSuccess('You have been added to the public Waiting List!');
+      await GroupService.addToWaitingList(user.id, {
+        notes: profile?.business_type ? `Entrepreneur working in ${profile.business_type}` : 'Seeking collective collaboration',
+        business_type: profile?.business_type,
+        district: profile?.district,
+      });
+      setActionSuccess('You have been added to the waiting list!');
       setTimeout(() => setActionSuccess(''), 4000);
-      fetchData();
+      await fetchData();
     } catch (e) {
       alert('Could not join waiting list: ' + e.message);
     }
@@ -194,7 +194,10 @@ export default function WaitingList() {
   if (loading) return <div className="loading-spinner"><div className="spinner" /></div>;
 
   const myGroupIds = myMemberships.map(m => m.group_id);
-  const pendingGroupIds = pendingRequests.map(r => r.group_id);
+  const acceptedGroupIds = userRequests.filter(r => r.status === 'accepted').map(r => r.group_id);
+  const allJoinedGroupIds = [...new Set([...myGroupIds, ...acceptedGroupIds])];
+  const pendingGroupIds = userRequests.filter(r => r.status === 'pending').map(r => r.group_id);
+  const declinedGroupIds = userRequests.filter(r => r.status === 'declined').map(r => r.group_id);
 
   return (
     <div>
@@ -277,7 +280,7 @@ export default function WaitingList() {
             gap: '0.5rem'
           }}
         >
-          <Crown size={16} /> My Groups & Memberships ({myMemberships.length})
+          <Crown size={16} /> My Groups & Memberships ({allJoinedGroupIds.length})
         </button>
       </div>
 
@@ -294,8 +297,11 @@ export default function WaitingList() {
             <div className="scheme-grid">
               {groups.map(group => {
                 const isCreator = user && group.creator_user_id === user.id;
-                const isMember = user && myGroupIds.includes(group.id);
-                const hasPending = user && pendingGroupIds.includes(group.id);
+                const isMember = user && allJoinedGroupIds.includes(group.id);
+                const userReq = user && userRequests.find(r => r.group_id === group.id);
+                const requestStatus = userReq?.status;
+                const hasPending = user && requestStatus === 'pending';
+                const isDeclined = user && requestStatus === 'declined';
                 const isReady = group.current_members >= group.required_members;
 
                 return (
@@ -354,7 +360,7 @@ export default function WaitingList() {
 
                     {/* Action Buttons */}
                     <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', borderTop: '1px solid var(--border-color)', paddingTop: '0.75rem' }}>
-                      {/* 1. Group Chat Button (for members or creator) */}
+                      {/* 1. Member or Creator -> Open Group Chat */}
                       {(isMember || isCreator) ? (
                         <>
                           <button
@@ -381,10 +387,10 @@ export default function WaitingList() {
                           )}
                         </>
                       ) : hasPending ? (
-                        /* 2. Pending join request */
+                        /* 2. Pending join request -> Show status and Message creator */
                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', width: '100%' }}>
                           <span className="status-tag status-tag--more-info" style={{ flex: 1 }}>
-                            <Clock size={12} /> Join Request Sent
+                            <Clock size={12} /> Request Pending
                           </span>
                           <button
                             className="btn btn--sm btn--ghost"
@@ -393,13 +399,33 @@ export default function WaitingList() {
                             <MessageSquare size={13} /> Message
                           </button>
                         </div>
+                      ) : isDeclined ? (
+                        /* 3. Declined join request -> Allow Request Again */
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', width: '100%' }}>
+                          <span className="status-tag status-tag--missing" style={{ flex: 1 }}>
+                            <AlertTriangle size={12} /> Request Declined
+                          </span>
+                          <button
+                            className="btn btn--sm btn--secondary"
+                            onClick={() => setSelectedGroupForJoin(group)}
+                            disabled={isReady}
+                          >
+                            Request Again
+                          </button>
+                        </div>
                       ) : (
-                        /* 3. Non-member: Request to join or Message creator */
+                        /* 4. Non-member: Request to join or Message creator */
                         <>
                           <button
                             className="btn btn--sm btn--primary"
-                            onClick={() => setSelectedGroupForJoin(group)}
-                            disabled={isReady}
+                            onClick={() => {
+                              if (!user) {
+                                navigate('/login');
+                                return;
+                              }
+                              setSelectedGroupForJoin(group);
+                            }}
+                            disabled={isReady || submitting}
                           >
                             <UserPlus size={13} /> {isReady ? 'Group Full' : 'Request to Join'}
                           </button>
@@ -504,7 +530,7 @@ export default function WaitingList() {
       {activeTab === 'my_groups' && (
         <div>
           <h3 className="section-heading" style={{ marginBottom: '1rem' }}>Groups You Belong To</h3>
-          {myMemberships.length === 0 ? (
+          {allJoinedGroupIds.length === 0 && !groups.some(g => g.creator_user_id === user?.id) ? (
             <div className="empty-state">
               <Users size={40} className="empty-state__icon" />
               <p className="empty-state__text">You haven't joined any groups yet.</p>
@@ -512,16 +538,20 @@ export default function WaitingList() {
             </div>
           ) : (
             <div className="scheme-grid">
-              {groups.filter(g => myGroupIds.includes(g.id) || g.creator_user_id === user?.id).map(g => (
+              {groups.filter(g => allJoinedGroupIds.includes(g.id) || g.creator_user_id === user?.id).map(g => (
                 <div key={g.id} className="card">
                   <div className="card__body">
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                       <div style={{ fontWeight: 600, color: 'var(--color-navy)', fontSize: 'var(--text-md)' }}>
                         {g.title || 'Collective Group'}
                       </div>
-                      {g.creator_user_id === user?.id && (
+                      {g.creator_user_id === user?.id ? (
                         <span className="status-tag status-tag--info" style={{ fontSize: '10px' }}>
                           <Crown size={10} /> Creator
+                        </span>
+                      ) : (
+                        <span className="status-tag status-tag--eligible" style={{ fontSize: '10px' }}>
+                          <CheckCircle2 size={10} /> Member
                         </span>
                       )}
                     </div>
@@ -547,6 +577,71 @@ export default function WaitingList() {
                   </div>
                 </div>
               ))}
+            </div>
+          )}
+
+          {/* Sub-section: Pending Requests */}
+          {pendingGroupIds.length > 0 && (
+            <div style={{ marginTop: '2rem' }}>
+              <h3 className="section-heading" style={{ marginBottom: '1rem' }}>Pending Requests ({pendingGroupIds.length})</h3>
+              <div className="scheme-grid">
+                {groups.filter(g => pendingGroupIds.includes(g.id)).map(g => (
+                  <div key={g.id} className="card" style={{ borderLeft: '4px solid var(--color-warning)' }}>
+                    <div className="card__body">
+                      <div style={{ fontWeight: 600, color: 'var(--color-navy)', fontSize: 'var(--text-md)' }}>
+                        {g.title || 'Collective Group'}
+                      </div>
+                      <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', margin: '0.25rem 0 0.75rem' }}>
+                        {g.location || 'Tamil Nadu'} • Creator: {getSafePublicId(g.creator_user_id)}
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '0.5rem' }}>
+                        <span className="status-tag status-tag--more-info" style={{ fontSize: '11px' }}>
+                          <Clock size={11} /> Request Pending
+                        </span>
+                        <button
+                          className="btn btn--sm btn--ghost"
+                          onClick={() => navigate(`/messages?userId=${g.creator_user_id}`)}
+                        >
+                          <MessageSquare size={13} /> Message Creator
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Sub-section: Declined Requests */}
+          {declinedGroupIds.length > 0 && (
+            <div style={{ marginTop: '2rem' }}>
+              <h3 className="section-heading" style={{ marginBottom: '1rem' }}>Declined Requests ({declinedGroupIds.length})</h3>
+              <div className="scheme-grid">
+                {groups.filter(g => declinedGroupIds.includes(g.id)).map(g => (
+                  <div key={g.id} className="card" style={{ borderLeft: '4px solid var(--color-danger)' }}>
+                    <div className="card__body">
+                      <div style={{ fontWeight: 600, color: 'var(--color-navy)', fontSize: 'var(--text-md)' }}>
+                        {g.title || 'Collective Group'}
+                      </div>
+                      <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', margin: '0.25rem 0 0.75rem' }}>
+                        {g.location || 'Tamil Nadu'} • Creator: {getSafePublicId(g.creator_user_id)}
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '0.5rem' }}>
+                        <span className="status-tag status-tag--missing" style={{ fontSize: '11px' }}>
+                          <AlertTriangle size={11} /> Request Declined
+                        </span>
+                        <button
+                          className="btn btn--sm btn--secondary"
+                          onClick={() => setSelectedGroupForJoin(g)}
+                          disabled={submitting}
+                        >
+                          Request Again
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </div>
@@ -628,45 +723,56 @@ export default function WaitingList() {
       )}
 
       {/* MODAL 2: REQUEST TO JOIN GROUP */}
-      {selectedGroupForJoin && (
-        <div className="modal-overlay" onClick={() => setSelectedGroupForJoin(null)}>
-          <div className="modal" onClick={e => e.stopPropagation()}>
-            <div className="modal__header">
-              <span className="modal__title">Request to Join Group</span>
-              <button className="btn btn--sm btn--ghost" onClick={() => setSelectedGroupForJoin(null)}><X size={18} /></button>
-            </div>
-            <div className="modal__body">
-              <h3 style={{ fontSize: 'var(--text-md)', fontWeight: 600, color: 'var(--color-navy)', marginBottom: '0.25rem' }}>
-                {selectedGroupForJoin.title}
-              </h3>
-              <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', marginBottom: '1rem' }}>
-                {selectedGroupForJoin.schemes?.name || 'Collective Scheme'} • {selectedGroupForJoin.location}
-              </p>
-
-              <div style={{ marginBottom: '1rem' }}>
-                <label className="form-label">Message for Group Creator (optional)</label>
-                <textarea
-                  className="form-textarea"
-                  rows={3}
-                  value={joinMessage}
-                  onChange={e => setJoinMessage(e.target.value)}
-                  placeholder="Introduce yourself, your trade, or why you want to collaborate..."
-                />
+      {selectedGroupForJoin && (() => {
+        const isDeclined = declinedGroupIds.includes(selectedGroupForJoin.id);
+        return (
+          <div className="modal-overlay" onClick={() => setSelectedGroupForJoin(null)}>
+            <div className="modal" onClick={e => e.stopPropagation()}>
+              <div className="modal__header">
+                <span className="modal__title">
+                  {isDeclined ? 'Request Again to Join Group' : 'Request to Join Group'}
+                </span>
+                <button className="btn btn--sm btn--ghost" onClick={() => setSelectedGroupForJoin(null)}><X size={18} /></button>
               </div>
+              <div className="modal__body">
+                <h3 style={{ fontSize: 'var(--text-md)', fontWeight: 600, color: 'var(--color-navy)', marginBottom: '0.25rem' }}>
+                  {selectedGroupForJoin.title}
+                </h3>
+                <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', marginBottom: '1rem' }}>
+                  {selectedGroupForJoin.schemes?.name || 'Collective Scheme'} • {selectedGroupForJoin.location}
+                </p>
 
-              <div style={{ background: 'var(--color-blue-pale)', padding: '0.75rem', borderRadius: 'var(--border-radius-sm)', fontSize: 'var(--text-xs)', color: 'var(--color-navy)' }}>
-                Once you send this request, the creator ({getSafePublicId(selectedGroupForJoin.creator_user_id)}) will receive a notification to Accept or Decline. Upon acceptance, you'll be automatically enrolled into the group and group chat.
+                {isDeclined && (
+                  <div className="alert alert--warning mb-3" style={{ fontSize: 'var(--text-xs)' }}>
+                    Your previous request for this group was declined. You can send an updated message to request again.
+                  </div>
+                )}
+
+                <div style={{ marginBottom: '1rem' }}>
+                  <label className="form-label">Message for Group Creator (optional)</label>
+                  <textarea
+                    className="form-textarea"
+                    rows={3}
+                    value={joinMessage}
+                    onChange={e => setJoinMessage(e.target.value)}
+                    placeholder="Introduce yourself, your trade, or why you want to collaborate..."
+                  />
+                </div>
+
+                <div style={{ background: 'var(--color-blue-pale)', padding: '0.75rem', borderRadius: 'var(--border-radius-sm)', fontSize: 'var(--text-xs)', color: 'var(--color-navy)' }}>
+                  Once you send this request, the creator ({getSafePublicId(selectedGroupForJoin.creator_user_id)}) will receive a notification to Accept or Decline. Upon acceptance, you'll be automatically enrolled into the group and group chat.
+                </div>
               </div>
-            </div>
-            <div className="modal__footer">
-              <button className="btn btn--ghost" onClick={() => setSelectedGroupForJoin(null)}>Cancel</button>
-              <button className="btn btn--primary" onClick={submitJoinRequest} disabled={submitting}>
-                {submitting ? 'Sending Request...' : 'Submit Join Request'}
-              </button>
+              <div className="modal__footer">
+                <button className="btn btn--ghost" onClick={() => setSelectedGroupForJoin(null)}>Cancel</button>
+                <button className="btn btn--primary" onClick={submitJoinRequest} disabled={submitting}>
+                  {submitting ? 'Submitting...' : (isDeclined ? 'Send Request Again' : 'Submit Join Request')}
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* MODAL 3: MANAGE JOIN REQUESTS (FOR CREATOR) */}
       {managingGroupId && (
