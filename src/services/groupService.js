@@ -207,24 +207,25 @@ export class GroupService {
    */
   static async requestToJoin(groupId, userId, creatorId, groupTitle = 'Collective Group', message = '') {
     try {
-      // 1. Check if join_requests table exists and insert
+      // 1. Insert join request using exact valid schema fields: group_id, requester_id, status, message
+      const payload = {
+        group_id: groupId,
+        requester_id: userId,
+        status: 'pending',
+        message: message || 'I would like to join this scheme group.',
+      };
+
       const { data, error } = await supabase
         .from('join_requests')
-        .insert({
-          group_id: groupId,
-          user_id: userId,
-          status: 'pending',
-          message: message || 'I would like to join this scheme group.',
-        })
-        .select()
-        .single();
+        .insert(payload);
 
       if (error) {
-        // If table doesn't exist yet, fallback to direct membership join or notify
-        if (error.code === '42P01') {
-          console.warn('join_requests table not yet created in Supabase SQL editor. Adding directly to group_members.');
-          return await this.joinGroupDirect(groupId, userId);
-        }
+        console.error('[GroupService requestToJoin Error]:', {
+          code: error.code,
+          message: error.message,
+          details: error.details,
+          hint: error.hint,
+        });
         throw error;
       }
 
@@ -239,7 +240,7 @@ export class GroupService {
         }).then(() => {}).catch(() => {});
       }
 
-      return data;
+      return { success: true, groupId, requesterId: userId };
     } catch (e) {
       console.error('requestToJoin error:', e);
       throw e;
@@ -247,7 +248,7 @@ export class GroupService {
   }
 
   /**
-   * Direct join fallback if join_requests table not yet created
+   * Direct join fallback if needed
    */
   static async joinGroupDirect(groupId, userId) {
     const { data, error } = await supabase
@@ -275,15 +276,40 @@ export class GroupService {
     try {
       const { data, error } = await supabase
         .from('join_requests')
-        .select('*, public_group_profiles:user_id(display_name, public_id, business_type, district, language)')
+        .select('id, group_id, requester_id, status, created_at, updated_at, message')
         .eq('group_id', groupId)
         .eq('status', 'pending');
 
       if (error) {
-        if (error.code === '42P01') return [];
-        throw error;
+        console.warn('fetchJoinRequests query note:', {
+          code: error.code,
+          message: error.message,
+          details: error.details,
+          hint: error.hint,
+        });
+        return [];
       }
-      return data || [];
+
+      if (!data || data.length === 0) return [];
+
+      // Fetch public group profiles for the requesters
+      const requesterIds = [...new Set(data.map(r => r.requester_id).filter(Boolean))];
+      let profilesMap = {};
+      if (requesterIds.length > 0) {
+        const { data: profs } = await supabase
+          .from('public_group_profiles')
+          .select('user_id, display_name, public_id, business_type, district, language')
+          .in('user_id', requesterIds);
+
+        if (profs) {
+          profs.forEach(p => { profilesMap[p.user_id] = p; });
+        }
+      }
+
+      return data.map(req => ({
+        ...req,
+        public_group_profiles: profilesMap[req.requester_id] || null,
+      }));
     } catch (e) {
       console.warn('fetchJoinRequests error:', e?.message || e);
       return [];
@@ -299,12 +325,17 @@ export class GroupService {
       const { data, error } = await supabase
         .from('join_requests')
         .select('group_id, status')
-        .eq('user_id', userId)
+        .eq('requester_id', userId)
         .eq('status', 'pending');
 
       if (error) {
-        if (error.code === '42P01') return [];
-        throw error;
+        console.warn('fetchUserPendingRequests note:', {
+          code: error.code,
+          message: error.message,
+          details: error.details,
+          hint: error.hint,
+        });
+        return [];
       }
       return data || [];
     } catch {

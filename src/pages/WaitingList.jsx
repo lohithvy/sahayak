@@ -686,7 +686,8 @@ export default function WaitingList() {
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
                   {groupRequests.map(req => {
                     const profileData = req.public_group_profiles;
-                    const safeId = profileData?.public_id || getSafePublicId(req.user_id);
+                    const requesterId = req.requester_id || req.user_id;
+                    const safeId = profileData?.public_id || getSafePublicId(requesterId);
                     return (
                       <div key={req.id} className="card" style={{ background: 'var(--color-gray-50)' }}>
                         <div className="card__body" style={{ padding: '0.75rem 1rem' }}>
@@ -711,14 +712,14 @@ export default function WaitingList() {
                           <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
                             <button
                               className="btn btn--sm btn--ghost"
-                              onClick={() => handleRequestResponse(req.id, req.user_id, 'decline', 'Your Group')}
+                              onClick={() => handleRequestResponse(req.id, requesterId, 'decline', 'Your Group')}
                               disabled={submitting}
                             >
                               Decline
                             </button>
                             <button
                               className="btn btn--sm btn--primary"
-                              onClick={() => handleRequestResponse(req.id, req.user_id, 'accept', 'Your Group')}
+                              onClick={() => handleRequestResponse(req.id, requesterId, 'accept', 'Your Group')}
                               disabled={submitting}
                             >
                               Accept to Group
