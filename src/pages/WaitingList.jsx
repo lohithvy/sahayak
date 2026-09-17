@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate, Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useApp } from '../contexts/AppContext';
 import { supabase } from '../services/supabase';
@@ -7,17 +7,19 @@ import { GroupService, getSafePublicId } from '../services/groupService';
 import { t } from '../i18n';
 import {
   Users, MapPin, MessageSquare, UserPlus, Plus, CheckCircle2,
-  Clock, ShieldCheck, X, Crown, Globe
+  Clock, ShieldCheck, X, Crown, Globe, AlertCircle, AlertTriangle
 } from 'lucide-react';
 
 export default function WaitingList() {
   const { user } = useAuth();
   const { profile, language } = useApp();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const [activeTab, setActiveTab] = useState('groups'); // 'groups' | 'people' | 'my_groups'
   const [groups, setGroups] = useState([]);
   const [publicProfiles, setPublicProfiles] = useState([]);
+  const [waitingList, setWaitingList] = useState([]);
   const [schemes, setSchemes] = useState([]);
   const [myMemberships, setMyMemberships] = useState([]);
   const [userRequests, setUserRequests] = useState([]);
@@ -32,6 +34,7 @@ export default function WaitingList() {
   const [showCreate, setShowCreate] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [actionSuccess, setActionSuccess] = useState('');
+  const [createError, setCreateError] = useState('');
 
   const [newGroup, setNewGroup] = useState({
     title: '',
@@ -94,6 +97,25 @@ export default function WaitingList() {
     fetchData();
   }, [fetchData]);
 
+  // Handle URL query parameters (e.g. /waiting-list?schemeId=xxx&create=true)
+  useEffect(() => {
+    const qSchemeId = searchParams.get('schemeId');
+    const qCreate = searchParams.get('create');
+
+    if (qSchemeId) {
+      const matchingScheme = schemes.find(s => s.id === qSchemeId);
+      setNewGroup(prev => ({
+        ...prev,
+        scheme_id: qSchemeId,
+        title: prev.title || (matchingScheme ? `${matchingScheme.name} Collective` : ''),
+        required_members: matchingScheme?.required_members > 1 ? matchingScheme.required_members : (prev.required_members || 5),
+      }));
+      if (qCreate === 'true' || qCreate === '1') {
+        setShowCreate(true);
+      }
+    }
+  }, [searchParams, schemes]);
+
   // Open manage requests modal for creator
   const openManageRequests = async (groupId) => {
     setManagingGroupId(groupId);
@@ -154,11 +176,27 @@ export default function WaitingList() {
 
   // Create new group
   const handleCreateGroup = async () => {
-    if (!user || !newGroup.title.trim() || submitting) return;
+    if (!user) {
+      navigate('/login');
+      return;
+    }
+
+    if (!newGroup.scheme_id || !newGroup.scheme_id.trim()) {
+      setCreateError('Please select a scheme before creating a group.');
+      return;
+    }
+
+    if (!newGroup.title.trim()) {
+      setCreateError('Please enter a title for your group.');
+      return;
+    }
+
+    setCreateError('');
     setSubmitting(true);
     try {
       await GroupService.createGroup(user.id, {
         ...newGroup,
+        scheme_id: newGroup.scheme_id.trim(),
         location: newGroup.location || profile?.district || 'Tamil Nadu',
       });
 
@@ -168,7 +206,7 @@ export default function WaitingList() {
       setTimeout(() => setActionSuccess(''), 4000);
       await fetchData();
     } catch (e) {
-      alert('Could not create group: ' + e.message);
+      setCreateError('Could not create group: ' + e.message);
     } finally {
       setSubmitting(false);
     }
@@ -211,7 +249,7 @@ export default function WaitingList() {
           <button className="btn btn--secondary" onClick={handleJoinWaitingList}>
             <Users size={14} /> Join Waiting List
           </button>
-          <button className="btn btn--primary" onClick={() => setShowCreate(true)}>
+          <button className="btn btn--primary" onClick={() => { setCreateError(''); setShowCreate(true); }}>
             <Plus size={14} /> {t('group.create', language)}
           </button>
         </div>
@@ -291,7 +329,7 @@ export default function WaitingList() {
             <div className="empty-state">
               <Users size={48} className="empty-state__icon" />
               <p className="empty-state__text">No active collective groups currently forming.</p>
-              <button className="btn btn--primary mt-4" onClick={() => setShowCreate(true)}>Create the First Group</button>
+              <button className="btn btn--primary mt-4" onClick={() => { setCreateError(''); setShowCreate(true); }}>Create the First Group</button>
             </div>
           ) : (
             <div className="scheme-grid">
@@ -854,29 +892,68 @@ export default function WaitingList() {
               <button className="btn btn--sm btn--ghost" onClick={() => setShowCreate(false)}><X size={18} /></button>
             </div>
             <div className="modal__body">
+              {createError && (
+                <div style={{
+                  padding: '0.75rem 1rem',
+                  marginBottom: '1rem',
+                  background: 'var(--color-error-bg, #fef2f2)',
+                  border: '1px solid var(--color-error, #ef4444)',
+                  borderRadius: 'var(--border-radius, 6px)',
+                  color: 'var(--color-error, #b91c1c)',
+                  fontSize: 'var(--text-sm)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.5rem',
+                  fontWeight: 500,
+                }}>
+                  <AlertCircle size={16} />
+                  <span>{createError}</span>
+                </div>
+              )}
+
+              <div className="form-group">
+                <label className="form-label">
+                  Target Scheme * <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', fontWeight: 400 }}>(Required — every group belongs to a real scheme)</span>
+                </label>
+                <select
+                  className="form-select"
+                  value={newGroup.scheme_id}
+                  onChange={e => {
+                    const sId = e.target.value;
+                    const selScheme = schemes.find(s => s.id === sId);
+                    setNewGroup(prev => ({
+                      ...prev,
+                      scheme_id: sId,
+                      title: !prev.title || schemes.some(s => prev.title === `${s.name} Collective`)
+                        ? (selScheme ? `${selScheme.name} Collective` : prev.title)
+                        : prev.title,
+                      required_members: selScheme?.required_members > 1 ? selScheme.required_members : (prev.required_members || 5),
+                    }));
+                    if (sId) setCreateError('');
+                  }}
+                  required
+                >
+                  <option value="">-- Please select a scheme --</option>
+                  {schemes.map(s => (
+                    <option key={s.id} value={s.id}>
+                      {s.name} {s.ministry ? `(${s.ministry})` : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
               <div className="form-group">
                 <label className="form-label">Group Title *</label>
                 <input
                   className="form-input"
                   value={newGroup.title}
-                  onChange={e => setNewGroup({ ...newGroup, title: e.target.value })}
+                  onChange={e => {
+                    setNewGroup({ ...newGroup, title: e.target.value });
+                    if (e.target.value.trim()) setCreateError('');
+                  }}
                   placeholder="e.g. Chennai Women Tailors Collective"
                   required
                 />
-              </div>
-
-              <div className="form-group">
-                <label className="form-label">Target Scheme (Optional)</label>
-                <select
-                  className="form-select"
-                  value={newGroup.scheme_id}
-                  onChange={e => setNewGroup({ ...newGroup, scheme_id: e.target.value })}
-                >
-                  <option value="">Select a scheme or general collective</option>
-                  {schemes.map(s => (
-                    <option key={s.id} value={s.id}>{s.name}</option>
-                  ))}
-                </select>
               </div>
 
               <div className="form-row">
@@ -918,7 +995,7 @@ export default function WaitingList() {
               <button
                 className="btn btn--primary"
                 onClick={handleCreateGroup}
-                disabled={submitting || !newGroup.title.trim()}
+                disabled={submitting || !newGroup.title.trim() || !newGroup.scheme_id}
               >
                 {submitting ? 'Creating...' : 'Create Group'}
               </button>

@@ -7,7 +7,7 @@ import { EligibilityEngine } from '../services/eligibility';
 import { GeminiService } from '../services/gemini';
 import { t } from '../i18n';
 import { formatDate, getEligibilityColor, getStatusLabel } from '../utils/constants';
-import { CheckCircle2, XCircle, AlertCircle, ExternalLink, ArrowLeft, BookOpen, Clock, FileText } from 'lucide-react';
+import { CheckCircle2, XCircle, AlertCircle, ExternalLink, ArrowLeft, BookOpen, Clock, FileText, Users } from 'lucide-react';
 
 export default function SchemeDetail() {
   const { id } = useParams();
@@ -261,7 +261,7 @@ export default function SchemeDetail() {
               </div>
             )}
 
-            {/* Apply Button */}
+            {/* Apply & Group Actions */}
             <div style={{ marginTop: '1.5rem' }}>
               {eligibility?.status !== 'NOT_ELIGIBLE' ? (
                 <button className="btn btn--primary btn--lg btn--full" onClick={startApplication} disabled={applying}>
@@ -272,6 +272,17 @@ export default function SchemeDetail() {
                   {t('scheme.not_eligible', language)}. Review the eligibility checks above for details.
                 </div>
               )}
+
+              {/* Form / Join Collective Group in Waiting List */}
+              <button
+                type="button"
+                className="btn btn--secondary btn--lg btn--full"
+                style={{ marginTop: '0.75rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem' }}
+                onClick={() => navigate(`/waiting-list?schemeId=${scheme.id}&create=true`)}
+              >
+                <Users size={16} /> Form Collective Group for this Scheme
+              </button>
+
               <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)', marginTop: '0.5rem', textAlign: 'center' }}>
                 {t('application.prototype_note', language)}
               </p>

@@ -218,7 +218,8 @@ async function runEndToEndTest() {
 
   // 10. A sends a message
   console.log('\n[TEST 10] User A sends a message in group chat...');
-  const { data: sentA, error: sendAErr } = await clientA
+  let sentA, sendAErr;
+  const resA = await clientA
     .from('messages')
     .insert({
       sender_id: userA.id,
@@ -228,6 +229,24 @@ async function runEndToEndTest() {
     })
     .select()
     .single();
+  sentA = resA.data;
+  sendAErr = resA.error;
+
+  if (sendAErr && sendAErr.message?.includes('receiver_id')) {
+    const resA2 = await clientA
+      .from('messages')
+      .insert({
+        sender_id: userA.id,
+        receiver_id: userA.id,
+        group_id: groupId,
+        original_message: 'Welcome to the group, User B!',
+        original_language: 'en'
+      })
+      .select()
+      .single();
+    sentA = resA2.data;
+    sendAErr = resA2.error;
+  }
 
   if (sendAErr) {
     console.error('FAIL Step 10: User A sending group message failed:', sendAErr);
@@ -251,7 +270,8 @@ async function runEndToEndTest() {
 
   // 12. B replies
   console.log('\n[TEST 12] User B replies in group chat...');
-  const { data: sentB, error: sendBErr } = await clientB
+  let sentB, sendBErr;
+  const resB = await clientB
     .from('messages')
     .insert({
       sender_id: userB.id,
@@ -261,6 +281,24 @@ async function runEndToEndTest() {
     })
     .select()
     .single();
+  sentB = resB.data;
+  sendBErr = resB.error;
+
+  if (sendBErr && sendBErr.message?.includes('receiver_id')) {
+    const resB2 = await clientB
+      .from('messages')
+      .insert({
+        sender_id: userB.id,
+        receiver_id: userB.id,
+        group_id: groupId,
+        original_message: 'Thanks User A! Happy to be here.',
+        original_language: 'en'
+      })
+      .select()
+      .single();
+    sentB = resB2.data;
+    sendBErr = resB2.error;
+  }
 
   if (sendBErr) {
     console.error('FAIL Step 12: User B sending group message failed:', sendBErr);

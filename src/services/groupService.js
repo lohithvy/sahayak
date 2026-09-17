@@ -144,13 +144,17 @@ export class GroupService {
    * Creates a new collective group scheme
    */
   static async createGroup(userId, groupData) {
+    if (!groupData.scheme_id || typeof groupData.scheme_id !== 'string' || !groupData.scheme_id.trim()) {
+      throw new Error('Please select a scheme before creating a group.');
+    }
+
     try {
       const payload = {
         creator_user_id: userId,
-        scheme_id: groupData.scheme_id || null,
-        title: groupData.title,
-        description: groupData.description,
-        location: groupData.location || '',
+        scheme_id: groupData.scheme_id.trim(),
+        title: groupData.title?.trim(),
+        description: groupData.description?.trim() || '',
+        location: groupData.location?.trim() || '',
         required_members: parseInt(groupData.required_members, 10) || 5,
         current_members: 1,
         status: 'forming',
