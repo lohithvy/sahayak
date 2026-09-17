@@ -603,17 +603,160 @@ export class GroupService {
   }
 
   /**
-   * Sends a 1-to-1 message with optional automated translation
+   * Securely resolves a user's preferred language from profile
    */
-  static async send1to1Message(senderId, receiverId, text, senderLang = 'en', receiverLang = 'en') {
+  static async getUserPreferredLanguage(userId) {
+    if (!userId) return 'en';
+    try {
+      // 1. Try secure RPC function (SECURITY DEFINER accesses profiles table safely)
+      const { data: rpcData, error: rpcErr } = await supabase.rpc('get_user_preferred_language', { _user_id: userId });
+      if (!rpcErr && rpcData) {
+        return rpcData;
+      }
+
+      // 2. If querying own profile, read from profiles directly (allowed by RLS auth.uid() = user_id)
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user && user.id === userId) {
+        const { data: ownProf } = await supabase
+          .from('profiles')
+          .select('preferred_language')
+          .eq('user_id', userId)
+          .maybeSingle();
+        if (ownProf?.preferred_language) {
+          return ownProf.preferred_language;
+        }
+      }
+
+      // 3. Fallback: query public_group_profiles (publicly readable via RLS)
+      const { data: publicProf } = await supabase
+        .from('public_group_profiles')
+        .select('language')
+        .eq('user_id', userId)
+        .maybeSingle();
+
+      if (publicProf?.language) {
+        return publicProf.language;
+      }
+    } catch (e) {
+      console.warn('getUserPreferredLanguage fallback note:', e);
+    }
+    return 'en';
+  }
+
+  /**
+   * Securely resolves multiple users' preferred languages in batch
+   */
+  static async getUsersPreferredLanguages(userIds) {
+    if (!userIds || userIds.length === 0) return new Map();
+    const langMap = new Map();
+
+    try {
+      // 1. Try secure batch RPC
+      const { data: rpcData, error: rpcErr } = await supabase.rpc('get_users_preferred_languages', { _user_ids: userIds });
+      if (!rpcErr && Array.isArray(rpcData)) {
+        rpcData.forEach(row => {
+          if (row?.user_id) langMap.set(row.user_id, row.preferred_language || 'en');
+        });
+        return langMap;
+      }
+    } catch (e) {
+      // Continue to fallback
+    }
+
+    // 2. Fallback: batch query public_group_profiles
+    try {
+      const { data: pubProfiles } = await supabase
+        .from('public_group_profiles')
+        .select('user_id, language')
+        .in('user_id', userIds);
+
+      (pubProfiles || []).forEach(p => {
+        if (p.user_id) langMap.set(p.user_id, p.language || 'en');
+      });
+    } catch (e) {
+      console.warn('getUsersPreferredLanguages fallback note:', e);
+    }
+
+    // Ensure all requested IDs have at least 'en' default
+    userIds.forEach(id => {
+      if (!langMap.has(id)) langMap.set(id, 'en');
+    });
+
+    return langMap;
+  }
+
+  /**
+   * Fetches cached translations for a list of message IDs for a specific target language
+   */
+  static async fetchMessageTranslations(messageIds, targetLang) {
+    if (!messageIds || messageIds.length === 0 || !targetLang) return new Map();
+    const translationMap = new Map();
+
+    try {
+      const { data, error } = await supabase
+        .from('message_translations')
+        .select('message_id, translated_content')
+        .in('message_id', messageIds)
+        .eq('target_language', targetLang);
+
+      if (!error && data) {
+        data.forEach(t => translationMap.set(t.message_id, t.translated_content));
+      }
+    } catch {
+      // Table might not exist yet or RLS restriction, graceful fallback
+    }
+
+    return translationMap;
+  }
+
+  /**
+   * Caches a message translation into public.message_translations
+   */
+  static async saveMessageTranslation(messageId, targetLang, translatedContent) {
+    if (!messageId || !targetLang || !translatedContent) return null;
+    try {
+      const { data, error } = await supabase
+        .from('message_translations')
+        .upsert({
+          message_id: messageId,
+          target_language: targetLang,
+          translated_content: translatedContent,
+          created_at: new Date().toISOString(),
+        }, { onConflict: 'message_id,target_language' })
+        .select()
+        .maybeSingle();
+
+      if (error) {
+        return null;
+      }
+      return data;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Sends a 1-to-1 message with profile-based automated translation
+   */
+  static async send1to1Message(senderId, receiverId, text, explicitSenderLang = null, explicitReceiverLang = null) {
     if (!text?.trim()) return null;
 
-    let translatedMessage = text.trim();
+    const originalText = text.trim();
+
+    // 1. Resolve sender and receiver preferred languages from user profiles
+    const senderLang = explicitSenderLang || (await this.getUserPreferredLanguage(senderId));
+    const receiverLang = explicitReceiverLang || (await this.getUserPreferredLanguage(receiverId));
+
+    let translatedMessage = originalText;
+
+    // 2. Only translate when target language differs
     if (senderLang !== receiverLang) {
       try {
-        translatedMessage = await GeminiService.translateText(text.trim(), senderLang, receiverLang);
+        translatedMessage = await GeminiService.translateText(originalText, senderLang, receiverLang);
       } catch (e) {
-        translatedMessage = text.trim();
+        console.warn('[1-to-1 Translation Error, fallback to original]:', e);
+        // Translation failure: never block message delivery, fallback to original
+        translatedMessage = originalText;
       }
     }
 
@@ -621,7 +764,7 @@ export class GroupService {
       sender_id: senderId,
       receiver_id: receiverId,
       group_id: null,
-      original_message: text.trim(),
+      original_message: originalText,
       original_language: senderLang,
       translated_message: translatedMessage,
       target_language: receiverLang,
@@ -635,13 +778,18 @@ export class GroupService {
 
     if (error) throw error;
 
+    // 3. Cache translation in message_translations if translated
+    if (data?.id && senderLang !== receiverLang && translatedMessage && translatedMessage !== originalText) {
+      this.saveMessageTranslation(data.id, receiverLang, translatedMessage).catch(() => {});
+    }
+
     // Send notification to receiver
     try {
       await supabase.from('notifications').insert({
         user_id: receiverId,
         type: 'message',
         title: 'New Message',
-        message: text.trim().slice(0, 60) + (text.length > 60 ? '...' : ''),
+        message: originalText.slice(0, 60) + (originalText.length > 60 ? '...' : ''),
         target_url: `/messages?userId=${senderId}`,
       });
     } catch {}
@@ -650,21 +798,27 @@ export class GroupService {
   }
 
   /**
-   * Sends a group message to all group members
+   * Sends a group message, saving the canonical original message
+   * and pre-caching translations for group members with distinct preferred languages.
    */
-  static async sendGroupMessage(senderId, groupId, text, senderLang = 'en') {
+  static async sendGroupMessage(senderId, groupId, text, explicitSenderLang = null) {
     if (!text?.trim() || !groupId) return null;
 
+    const originalText = text.trim();
+    const senderLang = explicitSenderLang || (await this.getUserPreferredLanguage(senderId));
+
+    // Store ONE canonical original message with sender's original language.
+    // Do NOT overwrite the canonical original message with a translation.
     const payload = {
       sender_id: senderId,
       group_id: groupId,
-      original_message: text.trim(),
+      original_message: originalText,
       original_language: senderLang,
-      translated_message: text.trim(),
-      target_language: senderLang,
+      translated_message: null,
+      target_language: null,
     };
 
-    // If receiver_id column has NOT NULL in DB before migration, use senderId as placeholder
+    let insertedMsg = null;
     try {
       const { data, error } = await supabase
         .from('messages')
@@ -681,15 +835,50 @@ export class GroupService {
           .select()
           .single();
         if (fbError) throw fbError;
-        return fbData;
+        insertedMsg = fbData;
+      } else if (error) {
+        throw error;
+      } else {
+        insertedMsg = data;
       }
-
-      if (error) throw error;
-      return data;
     } catch (e) {
       console.error('sendGroupMessage error:', e);
       throw e;
     }
+
+    // Background task: identify group members and pre-cache translations for distinct member languages
+    if (insertedMsg?.id) {
+      (async () => {
+        try {
+          const { data: members } = await supabase
+            .from('group_members')
+            .select('user_id')
+            .eq('group_id', groupId)
+            .neq('user_id', senderId);
+
+          const memberUserIds = (members || []).map(m => m.user_id);
+          if (memberUserIds.length > 0) {
+            const langMap = await this.getUsersPreferredLanguages(memberUserIds);
+            const distinctLangs = Array.from(new Set(Array.from(langMap.values()))).filter(l => l && l !== senderLang);
+
+            for (const targetLang of distinctLangs) {
+              try {
+                const translated = await GeminiService.translateText(originalText, senderLang, targetLang);
+                if (translated && translated !== originalText) {
+                  await this.saveMessageTranslation(insertedMsg.id, targetLang, translated);
+                }
+              } catch (err) {
+                console.warn(`[Group Pre-translation Error for ${targetLang}]:`, err);
+              }
+            }
+          }
+        } catch (bgErr) {
+          console.warn('[Group Pre-translation Task Note]:', bgErr);
+        }
+      })();
+    }
+
+    return insertedMsg;
   }
 
   /**

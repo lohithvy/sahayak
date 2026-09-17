@@ -17,7 +17,7 @@ export default function Messages() {
   const navigate = useNavigate();
 
   const { user } = useAuth();
-  const { language } = useApp();
+  const { language, profile } = useApp();
 
   // Active chat state: { type: 'direct' | 'group', id: string, data: object }
   const [activeChat, setActiveChat] = useState(null);
@@ -30,6 +30,8 @@ export default function Messages() {
   const [sending, setSending] = useState(false);
   const [loading, setLoading] = useState(true);
   const [showOriginal, setShowOriginal] = useState({});
+  const [translations, setTranslations] = useState({});
+  const translatingRef = useRef(new Set());
 
   const messagesEndRef = useRef(null);
   const chatContainerRef = useRef(null);
@@ -118,25 +120,28 @@ export default function Messages() {
         }
       });
 
-      // Fetch public profiles for contacts
+      // Fetch public profiles and preferred languages for contacts
       const otherIds = Array.from(contactMap.keys());
       if (otherIds.length > 0) {
-        const { data: profiles } = await supabase
-          .from('public_group_profiles')
-          .select('*')
-          .in('user_id', otherIds);
+        const [profilesRes, langsMap] = await Promise.all([
+          supabase.from('public_group_profiles').select('*').in('user_id', otherIds),
+          GroupService.getUsersPreferredLanguages(otherIds),
+        ]);
 
-        const profileMap = new Map((profiles || []).map(p => [p.user_id, p]));
+        const profiles = profilesRes.data || [];
+        const profileMap = new Map(profiles.map(p => [p.user_id, p]));
         const formattedContacts = otherIds.map(id => {
           const prof = profileMap.get(id);
           const meta = contactMap.get(id);
+          const resolvedLang = langsMap.get(id) || prof?.language || 'en';
           return {
             user_id: id,
             display_name: prof?.display_name || 'Entrepreneur',
             public_id: prof?.public_id || getSafePublicId(id),
             business_type: prof?.business_type || 'General',
             district: prof?.district || 'Tamil Nadu',
-            language: prof?.language || 'en',
+            language: resolvedLang,
+            preferred_language: resolvedLang,
             lastMessage: meta?.lastMessage,
             timestamp: meta?.timestamp,
           };
@@ -188,23 +193,22 @@ export default function Messages() {
       if (existing) {
         setActiveChat({ type: 'direct', id: existing.user_id, data: existing });
       } else {
-        // Fetch public profile for new contact
-        supabase
-          .from('public_group_profiles')
-          .select('*')
-          .eq('user_id', qUserId)
-          .maybeSingle()
-          .then(({ data }) => {
-            const newContact = {
-              user_id: qUserId,
-              display_name: data?.display_name || 'Entrepreneur',
-              public_id: data?.public_id || getSafePublicId(qUserId),
-              business_type: data?.business_type || 'General',
-              district: data?.district || 'Tamil Nadu',
-              language: data?.language || 'en',
-            };
-            setActiveChat({ type: 'direct', id: qUserId, data: newContact });
-          });
+        // Fetch public profile and resolved preferred language for new contact
+        Promise.all([
+          supabase.from('public_group_profiles').select('*').eq('user_id', qUserId).maybeSingle(),
+          GroupService.getUserPreferredLanguage(qUserId)
+        ]).then(([{ data }, resolvedLang]) => {
+          const newContact = {
+            user_id: qUserId,
+            display_name: data?.display_name || 'Entrepreneur',
+            public_id: data?.public_id || getSafePublicId(qUserId),
+            business_type: data?.business_type || 'General',
+            district: data?.district || 'Tamil Nadu',
+            language: resolvedLang || data?.language || 'en',
+            preferred_language: resolvedLang || data?.language || 'en',
+          };
+          setActiveChat({ type: 'direct', id: qUserId, data: newContact });
+        });
       }
     } else if (!activeChat && (groupChats.length > 0 || directContacts.length > 0)) {
       // Default to first group or first contact
@@ -216,19 +220,103 @@ export default function Messages() {
     }
   }, [searchParams, routeParams, groupChats, directContacts, user]);
 
+  // Helper to translate and cache a message for the viewer's preferred language
+  const resolveTranslation = useCallback(async (msg, targetLang) => {
+    if (!msg?.id || !targetLang || !msg?.original_message) return;
+    const origLang = msg.original_language || 'en';
+    if (origLang === targetLang) return;
+
+    const cacheKey = `${msg.id}_${targetLang}`;
+    if (translatingRef.current.has(cacheKey)) return;
+    translatingRef.current.add(cacheKey);
+
+    try {
+      // 1. Direct message target match check
+      if (msg.target_language === targetLang && msg.translated_message) {
+        setTranslations(prev => ({ ...prev, [msg.id]: msg.translated_message }));
+        return;
+      }
+
+      // 2. Fetch from message_translations table
+      const cachedMap = await GroupService.fetchMessageTranslations([msg.id], targetLang);
+      if (cachedMap.has(msg.id)) {
+        setTranslations(prev => ({ ...prev, [msg.id]: cachedMap.get(msg.id) }));
+        return;
+      }
+
+      // 3. Call server-side Gemini translation
+      const translated = await GeminiService.translateText(msg.original_message, origLang, targetLang);
+      if (translated && translated !== msg.original_message) {
+        setTranslations(prev => ({ ...prev, [msg.id]: translated }));
+        await GroupService.saveMessageTranslation(msg.id, targetLang, translated);
+      }
+    } catch (err) {
+      console.warn('resolveTranslation note:', err);
+    } finally {
+      translatingRef.current.delete(cacheKey);
+    }
+  }, []);
+
   // Fetch messages when activeChat changes and subscribe to Realtime
   useEffect(() => {
     if (!activeChat || !user) return;
 
     let isMounted = true;
+    const myLang = profile?.preferred_language || 'en';
 
     async function loadChatMessages() {
+      let msgs = [];
       if (activeChat.type === 'direct') {
-        const msgs = await GroupService.fetch1to1Messages(user.id, activeChat.id);
-        if (isMounted) setMessages(msgs);
+        msgs = await GroupService.fetch1to1Messages(user.id, activeChat.id);
       } else {
-        const msgs = await GroupService.fetchGroupMessages(activeChat.id);
-        if (isMounted) setMessages(msgs);
+        msgs = await GroupService.fetchGroupMessages(activeChat.id);
+      }
+      if (!isMounted) return;
+      setMessages(msgs);
+
+      // Identify messages needing translation for viewer
+      const needTranslations = msgs.filter(m =>
+        m.sender_id !== user.id &&
+        (m.original_language || 'en') !== myLang
+      );
+
+      if (needTranslations.length > 0) {
+        const directMatches = {};
+        const missingIds = [];
+
+        needTranslations.forEach(m => {
+          if (m.target_language === myLang && m.translated_message) {
+            directMatches[m.id] = m.translated_message;
+          } else {
+            missingIds.push(m.id);
+          }
+        });
+
+        if (Object.keys(directMatches).length > 0) {
+          setTranslations(prev => ({ ...prev, ...directMatches }));
+        }
+
+        if (missingIds.length > 0) {
+          // Batch fetch from message_translations table
+          GroupService.fetchMessageTranslations(missingIds, myLang).then(cachedMap => {
+            if (!isMounted) return;
+            if (cachedMap.size > 0) {
+              setTranslations(prev => {
+                const next = { ...prev };
+                cachedMap.forEach((val, k) => { next[k] = val; });
+                return next;
+              });
+            }
+
+            // Translate any still missing
+            missingIds.forEach(id => {
+              if (!cachedMap.has(id)) {
+                const item = msgs.find(m => m.id === id);
+                if (item) resolveTranslation(item, myLang);
+              }
+            });
+          });
+        }
       }
     }
 
@@ -256,10 +344,20 @@ export default function Messages() {
               (newMsg.sender_id === activeChat.id && newMsg.receiver_id === user.id)
             ) {
               setMessages(prev => (prev.some(m => m.id === newMsg.id) ? prev : [...prev, newMsg]));
+              if (newMsg.receiver_id === user.id && myLang !== (newMsg.original_language || 'en')) {
+                if (newMsg.target_language === myLang && newMsg.translated_message) {
+                  setTranslations(prev => ({ ...prev, [newMsg.id]: newMsg.translated_message }));
+                } else {
+                  resolveTranslation(newMsg, myLang);
+                }
+              }
             }
           } else {
             if (newMsg.group_id === activeChat.id) {
               setMessages(prev => (prev.some(m => m.id === newMsg.id) ? prev : [...prev, newMsg]));
+              if (newMsg.sender_id !== user.id && myLang !== (newMsg.original_language || 'en')) {
+                resolveTranslation(newMsg, myLang);
+              }
             }
           }
         }
@@ -270,7 +368,7 @@ export default function Messages() {
       isMounted = false;
       supabase.removeChannel(channel);
     };
-  }, [activeChat, user]);
+  }, [activeChat, user, profile?.preferred_language, resolveTranslation]);
 
   // Send message
   const handleSendMessage = async () => {
@@ -280,13 +378,18 @@ export default function Messages() {
     setInput('');
 
     try {
+      const senderLang = profile?.preferred_language || 'en';
+
       if (activeChat.type === 'direct') {
-        const receiverLang = activeChat.data?.language || 'en';
+        const receiverLang = activeChat.data?.preferred_language || 
+          activeChat.data?.language || 
+          (await GroupService.getUserPreferredLanguage(activeChat.id));
+
         const newMsg = await GroupService.send1to1Message(
           user.id,
           activeChat.id,
           textToSend,
-          language,
+          senderLang,
           receiverLang
         );
         if (newMsg) {
@@ -297,7 +400,7 @@ export default function Messages() {
           user.id,
           activeChat.id,
           textToSend,
-          language
+          senderLang
         );
         if (newMsg) {
           setMessages(prev => (prev.some(m => m.id === newMsg.id) ? prev : [...prev, newMsg]));
@@ -305,7 +408,7 @@ export default function Messages() {
       }
     } catch (e) {
       console.error('Failed to send message:', e);
-      alert('Message could not be sent: ' + (e.message || 'Please verify database schema.'));
+      alert('Message could not be sent: ' + (e.message || 'Please verify database connection.'));
     } finally {
       setSending(false);
     }
@@ -532,7 +635,7 @@ export default function Messages() {
                           <span>•</span>
                           <span>{activeChat.data?.business_type || 'Entrepreneur'}</span>
                           <span>•</span>
-                          <span><Globe size={11} style={{ verticalAlign: 'middle' }} /> {getLanguageEnglishName(activeChat.data?.language || 'en')}</span>
+                          <span><Globe size={11} style={{ verticalAlign: 'middle' }} /> {getLanguageEnglishName(activeChat.data?.preferred_language || activeChat.data?.language || 'en')}</span>
                         </>
                       )}
                     </div>
@@ -576,11 +679,26 @@ export default function Messages() {
                 ) : (
                   messages.map(msg => {
                     const isSender = msg.sender_id === user?.id;
-                    const showOrig = showOriginal[msg.id];
-                    const hasTranslation = msg.translated_message && msg.original_message !== msg.translated_message;
+                    const myLang = profile?.preferred_language || 'en';
+                    const origLang = msg.original_language || 'en';
+                    const isDiffLang = myLang !== origLang;
+
+                    // Translation text resolution:
+                    // 1. Direct message match for receiver's language
+                    // 2. translations state (from message_translations or on-the-fly translate)
+                    const translatedText = (msg.target_language === myLang && msg.translated_message)
+                      || translations[msg.id]
+                      || null;
+
+                    const hasTranslation = !isSender && isDiffLang && translatedText && translatedText !== msg.original_message;
+                    const showOrig = !!showOriginal[msg.id];
+
                     const displayMessage = isSender
                       ? msg.original_message
-                      : (showOrig ? msg.original_message : (msg.translated_message || msg.original_message));
+                      : (!isDiffLang
+                          ? msg.original_message
+                          : (showOrig ? msg.original_message : (translatedText || msg.original_message))
+                        );
 
                     const timeStr = msg.created_at
                       ? new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
@@ -603,9 +721,28 @@ export default function Messages() {
                         )}
 
                         <div className={`msg-bubble msg-bubble--${isSender ? 'sent' : 'received'}`} style={{ maxWidth: '75%' }}>
-                          <div style={{ fontSize: 'var(--text-sm)', lineHeight: 1.45, wordBreak: 'break-word' }}>
-                            {displayMessage}
-                          </div>
+                          {showOrig ? (
+                            <div>
+                              <div style={{
+                                fontSize: '10px',
+                                fontWeight: 700,
+                                textTransform: 'uppercase',
+                                letterSpacing: '0.5px',
+                                color: 'var(--color-navy)',
+                                opacity: 0.75,
+                                marginBottom: '2px',
+                              }}>
+                                Original ({getLanguageEnglishName(origLang)}):
+                              </div>
+                              <div style={{ fontSize: 'var(--text-sm)', lineHeight: 1.45, wordBreak: 'break-word' }}>
+                                {msg.original_message}
+                              </div>
+                            </div>
+                          ) : (
+                            <div style={{ fontSize: 'var(--text-sm)', lineHeight: 1.45, wordBreak: 'break-word' }}>
+                              {displayMessage}
+                            </div>
+                          )}
 
                           <div style={{
                             display: 'flex',
@@ -621,7 +758,7 @@ export default function Messages() {
                           </div>
 
                           {/* Translation controls */}
-                          {!isSender && hasTranslation && (
+                          {!isSender && isDiffLang && (
                             <div
                               className="msg-bubble__translate"
                               onClick={() => toggleOriginal(msg.id)}
@@ -631,14 +768,20 @@ export default function Messages() {
                                 paddingTop: '4px',
                                 fontSize: '11px',
                                 cursor: 'pointer',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '4px',
                                 color: 'var(--color-blue)',
                               }}
                             >
-                              <Globe size={10} style={{ display: 'inline', marginRight: '4px' }} />
-                              {showOrig
-                                ? t('msg.view_translation', language)
-                                : `View Original (${getLanguageEnglishName(msg.original_language || 'en')})`
-                              }
+                              <Globe size={11} style={{ flexShrink: 0 }} />
+                              {showOrig ? (
+                                <span>View Translation ({getLanguageEnglishName(myLang)})</span>
+                              ) : hasTranslation ? (
+                                <span>Translated to {getLanguageEnglishName(myLang)} • <strong>View Original</strong></span>
+                              ) : (
+                                <span style={{ fontStyle: 'italic', opacity: 0.8 }}>Translating to {getLanguageEnglishName(myLang)}...</span>
+                              )}
                             </div>
                           )}
                         </div>
@@ -663,8 +806,10 @@ export default function Messages() {
                   }}
                   placeholder={
                     activeChat.type === 'group'
-                      ? 'Message the group...'
-                      : `Message in ${getLanguageEnglishName(language)} (auto-translated to ${getLanguageEnglishName(activeChat.data?.language || 'en')})...`
+                      ? `Message the group in ${getLanguageEnglishName(profile?.preferred_language || 'en')} (auto-translated for members)...`
+                      : (profile?.preferred_language || 'en') === (activeChat.data?.preferred_language || activeChat.data?.language || 'en')
+                        ? 'Type your message...'
+                        : `Message in ${getLanguageEnglishName(profile?.preferred_language || 'en')} (auto-translated to ${getLanguageEnglishName(activeChat.data?.preferred_language || activeChat.data?.language || 'en')})...`
                   }
                   style={{ minHeight: 'auto' }}
                   disabled={sending}

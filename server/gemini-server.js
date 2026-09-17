@@ -1,6 +1,6 @@
 import { GoogleGenAI } from '@google/genai';
 
-const CANDIDATE_MODELS = ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.6-flash'];
+const CANDIDATE_MODELS = ['gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite'];
 
 const LANGUAGE_NAMES = {
   en: 'English', hi: 'Hindi', ta: 'Tamil', te: 'Telugu', kn: 'Kannada',
@@ -209,13 +209,19 @@ Return ONLY valid JSON. No markdown backticks, no commentary outside the JSON.`;
 
     case 'translate': {
       if (!text || sourceLang === targetLang) return { translatedText: text };
-      const p = `Translate the following text from ${sourceLang} to ${targetLang}. Return ONLY the translated text, nothing else.\n\nText: ${text}`;
+      const srcName = LANGUAGE_NAMES[sourceLang] || sourceLang;
+      const tgtName = LANGUAGE_NAMES[targetLang] || targetLang;
+      const p = `Translate the following text from ${srcName} (${sourceLang}) to ${tgtName} (${targetLang}). Return ONLY the translated text in the native script of ${tgtName}, nothing else.\n\nText: ${text}`;
       const config = {
-        systemInstruction: 'You are a professional translator specializing in Indian languages. Translate accurately preserving meaning and tone. Return only the translated text.',
-        temperature: 0.2,
+        systemInstruction: `You are a professional translator specializing in Indian languages. Translate accurately from ${srcName} to ${tgtName} preserving meaning, tone, and cultural nuance. Return ONLY the translated text in the native script of ${tgtName}. Do not include quotes, explanations, markdown formatting, or notes.`,
+        temperature: 0.1,
       };
       const result = await generateWithFallback(ai, p, config, false);
-      return { translatedText: result.text.trim() };
+      let translated = (result.text || '').trim();
+      if ((translated.startsWith('"') && translated.endsWith('"')) || (translated.startsWith('“') && translated.endsWith('”'))) {
+        translated = translated.slice(1, -1).trim();
+      }
+      return { translatedText: translated || text };
     }
 
     case 'extract-speech': {

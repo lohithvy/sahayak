@@ -187,23 +187,21 @@ export function AppProvider({ children }) {
       if (error) throw error;
       setProfile(data);
 
-      // Sync public group profile for peer discovery
-      if (data.full_name || data.business_type || data.district) {
-        supabase
-          .from('public_group_profiles')
-          .upsert({
-            user_id: user.id,
-            display_name: data.full_name || 'Entrepreneur',
-            business_type: data.business_type,
-            business_category: data.business_category,
-            district: data.district,
-            state: data.state,
-            language: data.preferred_language || 'en',
-            updated_at: new Date().toISOString(),
-          }, { onConflict: 'user_id' })
-          .then(() => {})
-          .catch(e => console.warn('Public profile sync skipped:', e));
-      }
+      // Always sync public group profile language and details for peer discovery and messaging
+      supabase
+        .from('public_group_profiles')
+        .upsert({
+          user_id: user.id,
+          display_name: data.full_name || 'Entrepreneur',
+          business_type: data.business_type,
+          business_category: data.business_category,
+          district: data.district,
+          state: data.state,
+          language: data.preferred_language || 'en',
+          updated_at: new Date().toISOString(),
+        }, { onConflict: 'user_id' })
+        .then(() => {})
+        .catch(e => console.warn('Public profile sync skipped:', e));
 
       return data;
     } catch (e) {
