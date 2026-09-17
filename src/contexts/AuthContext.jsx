@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useState } from 'react';
-import { supabase } from '../services/supabase';
+import { supabase, getAppBaseUrl } from '../services/supabase';
 
 const AuthContext = createContext({});
 
@@ -27,7 +27,15 @@ export function AuthProvider({ children }) {
   }, []);
 
   const signUp = async (email, password) => {
-    const { data, error } = await supabase.auth.signUp({ email, password });
+    // Dynamically resolve redirect URL to current deployed origin in production
+    const emailRedirectTo = getAppBaseUrl('/onboarding');
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: {
+        emailRedirectTo,
+      },
+    });
     if (error) throw error;
     return data;
   };
@@ -38,18 +46,35 @@ export function AuthProvider({ children }) {
     return data;
   };
 
+  const signInWithOAuth = async (provider) => {
+    // Ensure OAuth redirects stay on current deployed origin
+    const redirectTo = getAppBaseUrl('/dashboard');
+    const { data, error } = await supabase.auth.signInWithOAuth({
+      provider,
+      options: {
+        redirectTo,
+      },
+    });
+    if (error) throw error;
+    return data;
+  };
+
   const signOut = async () => {
     const { error } = await supabase.auth.signOut();
     if (error) throw error;
   };
 
   const resetPassword = async (email) => {
-    const { error } = await supabase.auth.resetPasswordForEmail(email);
+    // Dynamically resolve redirect URL to current deployed origin in production
+    const redirectTo = getAppBaseUrl('/login');
+    const { error } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo,
+    });
     if (error) throw error;
   };
 
   return (
-    <AuthContext.Provider value={{ user, session, loading, signUp, signIn, signOut, resetPassword }}>
+    <AuthContext.Provider value={{ user, session, loading, signUp, signIn, signInWithOAuth, signOut, resetPassword }}>
       {children}
     </AuthContext.Provider>
   );
